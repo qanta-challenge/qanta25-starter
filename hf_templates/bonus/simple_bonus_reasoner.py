@@ -1,3 +1,4 @@
+# %%
 """
 File: simple_bonus_reasoner.py
 
@@ -23,6 +24,7 @@ and optionally "previous_parts" (a list of dicts containing "text" and "guess").
 import json_repair
 import torch
 import torch.nn.functional as F
+from datasets import Dataset, load_dataset
 from transformers import (
     AutoModelForCausalLM,
     AutoTokenizer,
@@ -68,10 +70,12 @@ def format_parts(parts: list[dict]) -> str:
 
 # Define system and user prompts for the pipeline.
 system_prompt = """
-You are a quizbowl player. Given a leadin and your responses to previous related parts,
-provide the answer, a brief (1-2 sentences) explanation, and your confidence in the guess.
+You are a well-calibrated, rational and logical savvy Quizbowl player. Given a lead-in and a part question, you will provide a concise answer,
+a brief (1-2 sentences) explanation, and your confidence in the guess.
 The answer should be a single word or a short phrase, and the explanation should be concise and relevant.
 Provide the output in the JSON format:
+
+Don't think for more than 1000 words, and don't use more than 2000 tokens in total.
 
 {
     "answer": <str>,
@@ -125,83 +129,81 @@ class QWenReasonerBonusPipeline(Pipeline):
 
     def preprocess(self, inputs):
         """
-        Prepare the input text by applying a chat template that includes a system directive
+        Prepare a batch of input texts by applying a chat template that includes a system directive
         and a user prompt with quizbowl details. Enables thinking mode for the reasoner.
 
         Args:
-            inputs (dict): Dictionary containing "leadin", "part", and "previous_parts".
+            inputs (dict): Dictionary where each value is a list of length batch size,
+                           with keys "leadin", "part", and optionally "previous_parts".
 
         Returns:
-            str: The formatted text input for the model.
+            dict: Tokenized batch input for the model.
         """
-        leadin = inputs.get("leadin", "")
-        part = inputs.get("part", "")
-        previous_parts_text = format_parts(inputs.get("previous_parts", []))
-
-        messages = [
-            {"role": "system", "content": system_prompt},
-            {
-                "role": "user",
-                "content": user_prompt_template.format(
-                    leadin=leadin,
-                    previous_parts_text=previous_parts_text,
-                    part=part,
-                ),
-            },
-        ]
-        # Apply chat template with enable_thinking=True to trigger reasoning output.
-        text = self.tokenizer.apply_chat_template(
-            messages, tokenize=False, add_generation_prompt=True, enable_thinking=True
+        batch_size = len(inputs["leadin"])
+        conversations = []
+        for i in range(batch_size):
+            leadin = inputs["leadin"][i]
+            part = inputs["part"][i]
+            previous_parts_text = ""
+            if "previous_parts" in inputs:
+                previous_parts = inputs["previous_parts"][i]
+                previous_parts_text = format_parts(previous_parts[i])
+            messages = [
+                {"role": "system", "content": system_prompt},
+                {
+                    "role": "user",
+                    "content": user_prompt_template.format(
+                        leadin=leadin,
+                        previous_parts_text=previous_parts_text,
+                        part=part,
+                    ),
+                },
+            ]
+            conversations.append(messages)
+        texts = self.tokenizer.apply_chat_template(
+            conversations,
+            tokenize=False,
+            add_generation_prompt=True,
+            enable_thinking=True,
         )
-        return self.tokenizer(text, return_tensors="pt")
+        return self.tokenizer(texts, return_tensors="pt", padding=True)
 
     def _forward(self, model_inputs):
         """
-        Perform the text generation using the model.
+        Perform the text generation using the model for a batch of inputs.
 
         Args:
             model_inputs (dict): Tokenized inputs for the model.
 
         Returns:
-            ModelOutput: The output from the model's generate function.
+            list[dict]: A list of outputs for each item in the batch.
         """
         with torch.no_grad():
             outputs = self.model.generate(
                 **model_inputs,
                 max_new_tokens=32768,
-                do_sample=False,
+                # do_sample=True,
                 return_dict_in_generate=True,
                 output_scores=True,
             )
-            generated_ids = outputs.sequences[0]
-            input_ids = model_inputs["input_ids"][0]
-            output_ids = generated_ids[len(input_ids) :]
-            return {
-                "output_ids": output_ids,
-                "scores": outputs.scores,
+            batch_size = model_inputs["input_ids"].shape[0]
+            results = {
+                "output_ids": [],
+                "scores": [],
             }
+            for i in range(batch_size):
+                input_ids = model_inputs["input_ids"][i]
+                output_ids = outputs.sequences[i][len(input_ids) :]
+                # outputs.scores is a list of length max_new_tokens, each of shape (batch_size, vocab_size)
+                # For each token, take the i-th batch element's score
+                scores = (
+                    [score[i] for score in outputs.scores] if outputs.scores else []
+                )
+                results["output_ids"].append(output_ids.tolist())
+                results["scores"].append(scores)
+            return results
 
-    def postprocess(self, model_outputs):
-        """
-        Process the generated output from the model.
-
-        The output is expected to contain both the "thinking" content (internal reasoning)
-        and the final answer content. The method slices the output tokens based on a special
-        token (e.g., </think>) if available. It extracts the answer and explanation and calculates
-        a confidence score by averaging softmax probabilities over generated tokens.
-
-        Args:
-            model_outputs: The raw output from the model.
-
-        Returns:
-            dict: A dictionary with keys "answer", "confidence", and "explanation".
-        """
-        output_ids = model_outputs["output_ids"].tolist()
-
-        # Attempt to parse the output that may include a thinking portion.
-        # The special token id for ending thinking (assumed as an example) is 151668.
-        # This part separates thinking process (internal) from the final response.
-
+    def _postprocess_single(self, output_ids: list[int], scores: list[float] = None):
         try:
             think_index = len(output_ids) - output_ids[::-1].index(
                 self.think_end_token_id
@@ -238,11 +240,8 @@ class QWenReasonerBonusPipeline(Pipeline):
             return {"answer": "", "confidence": 0.0, "explanation": ""}
 
         # Compute a confidence score by averaging the max softmax probabilities over generated tokens.
-        if "scores" in model_outputs:
-            probs = [
-                F.softmax(score, dim=-1).max().item()
-                for score in model_outputs["scores"]
-            ]
+        if scores is not None and len(scores) > 0:
+            probs = [F.softmax(score, dim=-1).max().item() for score in scores]
             logit_confidence = float(sum(probs) / len(probs)) if probs else 0.0
         else:
             logit_confidence = 0.0
@@ -258,9 +257,45 @@ class QWenReasonerBonusPipeline(Pipeline):
 
         # For tutorial purposes, also print the internal thinking if needed.
         # In production, you might want to log this information instead of printing.
-        print("Internal Thinking:", thinking_content)
+        # print("Internal Thinking:", thinking_content)
 
-        return {"answer": answer, "confidence": confidence, "explanation": explanation}
+        return {
+            "answer": answer,
+            "confidence": confidence,
+            "explanation": explanation,
+            "thinking": thinking_content,
+        }
+
+    def postprocess(self, model_outputs):
+        """
+        Process the generated output from the model.
+
+        The output is expected to contain both the "thinking" content (internal reasoning)
+        and the final answer content. The method slices the output tokens based on a special
+        token (e.g., </think>) if available. It extracts the answer and explanation and calculates
+        a confidence score by averaging softmax probabilities over generated tokens.
+
+        Args:
+            model_outputs: The raw output from the model.
+
+        Returns:
+            dict: A dictionary with keys "answer", "confidence", and "explanation".
+        """
+        batch_output_ids = model_outputs["output_ids"]
+        batch_scores = model_outputs.get("scores", [])
+        keys = ["answer", "confidence", "explanation", "thinking"]
+        # Initialize results dictionary with empty lists for each key.
+        results = {key: [] for key in keys}
+        for i, output_ids in enumerate(batch_output_ids):
+            logprobs = batch_scores[i] if batch_scores else None
+            result = self._postprocess_single(output_ids, logprobs)
+            for key in keys:
+                results[key].append(result.get(key, ""))
+        return results
+
+        # Attempt to parse the output that may include a thinking portion.
+        # The special token id for ending thinking (assumed as an example) is 151668.
+        # This part separates thinking process (internal) from the final response.
 
 
 # Register the custom pipeline with Hugging Face's PIPELINE_REGISTRY.
@@ -275,3 +310,43 @@ PIPELINE_REGISTRY.register_pipeline(
     },
     type="text",
 )
+# %%
+if __name__ == "__main__":
+    # Example usage of the pipeline.
+    dataset_name = "qanta-challenge/qanta25-eval"
+    dataset = load_dataset(dataset_name, "bonus", split="tiny_eval")
+
+    examples = []
+    if len(dataset) > 10:
+        dataset = dataset.select(range(10))  # Limit to first 10 examples for testing.:
+    for e in dataset:
+        for part in e["parts"]:
+            examples.append(
+                {
+                    "leadin": e["leadin"],
+                    "part": part["question"],
+                }
+            )
+
+    # Print the first example to verify the input format.
+    print("Example input:", examples[0])
+
+    # Load the model and tokenizer.
+    model_name = "Qwen/Qwen3-0.6B"  # Replace with your actual model name.
+    tokenizer = AutoTokenizer.from_pretrained(model_name)
+    model = AutoModelForCausalLM.from_pretrained(model_name)
+
+    # %%
+    pipe = QWenReasonerBonusPipeline(model=model, tokenizer=tokenizer)
+
+    part_dataset = Dataset.from_list(examples)
+
+    outputs = pipe(part_dataset, batch_size=1)
+    for e, o in zip(examples, outputs):
+        print(f"Input: {e['part']}")
+        print(
+            f"Output: {o['answer']}, Confidence: {o['confidence']:.2f}, Explanation: {o['explanation']}"
+        )
+        print("-" * 80)
+
+# %%

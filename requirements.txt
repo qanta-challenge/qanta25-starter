@@ -1,3 +1,28 @@
-transformers==4.52.3
-json-repair==0.46
+torch>=2.0.0
+transformers==4.52.4
+tokenizers>=0.15.0
+sentencepiece
+datasets>=3.0.0
+json-repair>=0.46.0
 accelerate>=1.7.0
+torch>=2.0.0
+torchao>=0.11.0
+
+# autoawq==0.2.9
+# vllm
+
+# Evaluation of the model
+litellm
+diskcache
+inflect
+nltk
+spacy
+unidecode
+numpy<2.0.0
+pandas
+
+# Logging and misc
+loguru
+rich
+tqdm
+tabulate
