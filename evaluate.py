@@ -1,3 +1,60 @@
+"""
+📊 QANTA Model Evaluation Suite
+
+This script evaluates Quiz Bowl model performance on both bonus and tossup tasks,
+providing comprehensive metrics and analysis of your pipeline's accuracy and effectiveness.
+
+FEATURES:
+- ✅ Automatic evaluation of all models in outputs directory
+- ✅ Support for both bonus and tossup task evaluation
+- ✅ Comprehensive metrics calculation and reporting
+- ✅ Beautiful tabular output with rich formatting
+- ✅ Comparison across multiple models
+- ✅ Integration with QANTA evaluation datasets
+
+USAGE EXAMPLES:
+
+1. Evaluate all models for a specific task:
+   python evaluate.py --mode bonus
+
+2. Evaluate a specific model:
+   python evaluate.py --mode tossup --model Qwen/Qwen2.5-3B-Instruct
+
+3. Evaluate with custom dataset:
+   python evaluate.py --mode bonus --dataset qanta-challenge/custom-dataset
+
+4. Evaluate all bonus models:
+   python evaluate.py --mode bonus
+
+METRICS PROVIDED:
+
+Bonus Task Metrics:
+- accuracy: Overall accuracy across all bonus parts
+- part_accuracy: Accuracy broken down by bonus part
+- avg_confidence: Average confidence scores
+- calibration: How well confidence correlates with correctness
+
+Tossup Task Metrics:
+- accuracy: Overall accuracy of buzzes
+- buzz_accuracy: Accuracy when model chooses to buzz
+- optimal_buzz_rate: Percentage of optimal buzz decisions
+- early_buzz_penalty: Cost of buzzing too early
+- position_analysis: Performance at different question positions
+
+OUTPUT:
+- Results displayed in formatted table
+- Detailed metrics for model comparison
+- Performance breakdown by question type
+- Statistical significance indicators
+
+REQUIREMENTS:
+- Model outputs must be in outputs/{dataset}/{mode}/{model}.jsonl format
+- Each output file should contain predictions in the expected format
+- Gold standard data loaded from specified dataset
+
+For more details on metrics and evaluation methodology, see the metrics/ directory.
+"""
+
 import argparse
 import glob
 import json
@@ -10,11 +67,7 @@ from rich import print as rprint
 
 from io_utils import read_jsonl
 from metrics import compute_bonus_metrics, compute_tossup_metrics
-from metrics.qb_metrics import (
-    TossupModelOutput,
-    TossupRunOutput,
-    compute_tossup_metrics,
-)
+from metrics.qb_metrics import TossupModelOutput, TossupRunOutput
 
 
 def load_jsonl(filepath):
@@ -148,7 +201,6 @@ def evaluate_model(model_name, dataset_name, mode, examples_by_qid):
 
 
 def create_parser():
-
     parser = argparse.ArgumentParser(description="Evaluate Tossup Model")
     parser.add_argument(
         "--dataset",
@@ -178,7 +230,6 @@ def create_parser():
 
 
 if __name__ == "__main__":
-
     from tabulate import tabulate
 
     parser = create_parser()

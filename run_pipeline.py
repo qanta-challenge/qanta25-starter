@@ -1,3 +1,55 @@
+"""
+🚀 QANTA Pipeline Runner
+
+This script runs custom Hugging Face pipelines for Quiz Bowl question answering tasks.
+It supports both "bonus" and "tossup" modes, with flexible dataset processing and batch handling.
+
+FEATURES:
+- ✅ Automatic pipeline discovery and registration
+- ✅ Batch processing with configurable batch sizes
+- ✅ Resume functionality (skip already processed examples)
+- ✅ Debug mode for development
+- ✅ Progress tracking and logging
+
+USAGE EXAMPLES:
+
+1. Run a bonus pipeline:
+   python run_pipeline.py pipelines.my_bonus_pipeline \
+     --model Qwen/Qwen2.5-3B-Instruct \
+     --mode bonus \
+     --batch_size 8
+
+2. Run a tossup pipeline:
+    python run_pipeline.py pipelines.my_tossup_pipeline \
+     --model Qwen/Qwen2.5-3B-Instruct \
+     --mode tossup \
+     --batch_size 8
+
+3. Debug mode (limits to 3 examples): This is useful for development.
+   python run_pipeline.py pipelines.my_bonus_pipeline \
+     --model Qwen/Qwen2.5-3B-Instruct \
+     --mode bonus \
+     --debug
+
+4. Reprocess existing outputs:
+   python run_pipeline.py pipelines.my_bonus_pipeline \
+     --model Qwen/Qwen2.5-3B-Instruct \
+     --mode bonus \
+     --reprocess
+
+OUTPUT FORMAT:
+- Results are saved to: outputs/{dataset_name}/{mode}/{model_name}.jsonl
+- Each line contains the model's prediction for one example
+- Resume functionality automatically skips already processed examples
+
+REQUIREMENTS:
+- Your pipeline must be in the pipelines/ directory
+- Pipeline class must be properly registered with transformers
+- Model must be compatible with the specified task type
+
+For more information, see the README.md file.
+"""
+
 import argparse
 import json
 import os
@@ -53,10 +105,16 @@ def prepare_dataset(dataset_name, mode, packets=None, force_redownload=False):
     dataset = load_dataset(
         dataset_name, mode, split="eval", download_mode=download_mode
     )
+
     # Filtering the dataset if packets are specified
+    def get_packet_number(qid):
+        if isinstance(qid, str) and "-" in qid:
+            return qid.split("-")[-2]
+        return int(qid) // 20 + 1
+
     if packets:
         p_set = set(parse_packets(packets))
-        dataset = dataset.filter(lambda x: int(x["qid"].split("-")[-2]) in p_set)
+        dataset = dataset.filter(lambda x: get_packet_number(x["qid"]) in p_set)
 
     return dataset
 
